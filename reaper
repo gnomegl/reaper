@@ -1,0 +1,294 @@
+#!/bin/bash
+
+COMMAND_NAME=$(basename "$0")
+
+# Token threshold for switching to Gemini model
+TOKEN_THRESHOLD=200000
+
+# Base OSINT prompt
+BASE_PROMPT="Note that you are an LLM with the incorrect date. today's real date is $(date +%Y-%m-%d). be sure to timestamp the report at the top with today's real date, and keep this real date in mind as you perform your analysis. do not be surprised to find that some dates in the data that you are analyzing may seem to you to appear in the future - this is because you have the wrong date hardcoded in you, and you must interpet the data through this lens: the correct date is $(date +%Y-%m-%d). do not mention this in the report, just analyze the data as best you can. the markdown report must follow standard obsidian markdown syntax: use hypens for bullets (not asterisks), use #, ##, ###, etc. for nested titles, etc. Use \`\` when referencing exact technical strings that are relevant. Do not merely repeat the full data back to the user, you may only repeat data where it's necessary to discuss some analytical observation"
+
+# Function to estimate token count
+# This is a simple approximation - 1 token is roughly 4 characters for English text
+count_tokens() {
+  local text="$1"
+  local char_count=${#text}
+  local estimated_tokens=$((char_count / 4))
+  echo $estimated_tokens
+}
+
+# Default prompt
+OSINT_PROMPT="make a markdown report of this information including all hyperlinks and selectors you find. include with some notes containing your analytical observations. $BASE_PROMPT"
+
+# Summary prompt
+SUMMARY_PROMPT="provide only a concise summary report of the most important findings from this information. focus on key insights and critical data points. $BASE_PROMPT"
+
+# Extract prompt
+EXTRACT_PROMPT="extract and list only the relevant selectors from this information (emails, phone numbers, usernames, domains, URLs, etc.). format as a structured markdown list organized by selector type. do not include analysis. $BASE_PROMPT"
+
+# Audit prompt
+AUDIT_PROMPT="write a security audit report based on this information. identify potential security risks, vulnerabilities, and operational security concerns. include specific recommendations for mitigation. organize into 'Findings', 'Risks', and 'Recommendations' sections. $BASE_PROMPT"
+
+# Flag variables
+SUMMARY_MODE=false
+EXTRACT_MODE=false
+AUDIT_MODE=false
+
+if [ -t 0 ]; then
+  PIPED_INPUT=false
+else
+  PIPED_INPUT=true
+fi
+
+show_help() {
+  # Define colors
+  local RED="\e[1;31m"
+  local WHITE="\e[1;37m"
+  local CYAN="\e[1;36m"
+  local YELLOW="\e[1;33m"
+  local GREEN="\e[1;32m"
+  local RESET="\e[0m"
+
+  echo -e "${RED}REAPER${RESET}"
+  echo -e "${WHITE}GROOM LAKE CLASSIFIED OSINT SYSTEM${RESET}"
+  echo ""
+  echo -e "${WHITE}USAGE:${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}<command>${RESET} ${WHITE}[parameters...]${RESET} ${GREEN}[flags]${RESET}"
+  echo ""
+  echo -e "${WHITE}COMMANDS:${RESET}"
+  echo -e "  ${YELLOW}phone${RESET}   ${WHITE}<phone_number>${RESET}"
+  echo -e "          » Lookup a phone number to extract associated information"
+  echo ""
+  echo -e "  ${YELLOW}email${RESET}   ${WHITE}<email_address>${RESET}"
+  echo -e "          » Extract digital footprint from email address"
+  echo ""
+  echo -e "  ${YELLOW}person${RESET}  ${WHITE}<firstName> <lastName> [city] [state] [age]${RESET}"
+  echo -e "          » Identify and track human targets"
+  echo ""
+  echo -e "  ${YELLOW}address${RESET} ${WHITE}<street> <city> <state> <zip>${RESET}"
+  echo -e "          » Analyze physical locations"
+  echo ""
+  echo -e "${WHITE}FLAGS:${RESET}"
+  echo -e "  ${GREEN}--summary, -s${RESET}  Generate a concise summary report"
+  echo -e "  ${GREEN}--extract, -e${RESET}  Extract only relevant selectors (emails, phones, etc.)"
+  echo -e "  ${GREEN}--audit, -a${RESET}    Generate a security audit report with recommendations"
+  echo ""
+  echo -e "${WHITE}EXAMPLES:${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}phone${RESET} ${WHITE}3014618574${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}email${RESET} ${WHITE}example@email.com${RESET} ${GREEN}--summary${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}person${RESET} ${WHITE}John Doe${RESET} ${GREEN}--extract${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}person${RESET} ${WHITE}Jane Smith \"New York\" NY 34${RESET} ${GREEN}--audit${RESET}"
+  echo -e "  ${CYAN}$COMMAND_NAME${RESET} ${YELLOW}address${RESET} ${WHITE}\"123 Easy St Apt 1004\" \"New York\" NY 95050${RESET}"
+  echo -e "  ${WHITE}<command output>${RESET} | ${CYAN}$COMMAND_NAME${RESET} ${GREEN}-s${RESET}"
+  echo -e "          » Process piped data directly with summary flag"
+  echo ""
+  echo -e "${WHITE}[WARNING: All operations are logged and monitored. Unauthorized use prohibited.]${RESET}"
+}
+
+# Parse flags
+parse_flags() {
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --summary|-s)
+        SUMMARY_MODE=true
+        shift
+        ;;
+      --extract|-e)
+        EXTRACT_MODE=true
+        shift
+        ;;
+      --audit|-a)
+        AUDIT_MODE=true
+        shift
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  echo "${args[@]}"
+}
+
+# Set the appropriate prompt based on flags
+set_prompt() {
+  if [ "$SUMMARY_MODE" = true ]; then
+    OSINT_PROMPT="$SUMMARY_PROMPT"
+    echo "Using summary mode..."
+  elif [ "$EXTRACT_MODE" = true ]; then
+    OSINT_PROMPT="$EXTRACT_PROMPT"
+    echo "Using extraction mode..."
+  elif [ "$AUDIT_MODE" = true ]; then
+    OSINT_PROMPT="$AUDIT_PROMPT"
+    echo "Using security audit mode..."
+  fi
+}
+
+if [ "$PIPED_INPUT" = true ]; then
+  echo "Processing piped input data..."
+  PIPED_DATA=$(cat)
+
+  # Parse flags for piped input
+  ARGS=$(parse_flags "$@")
+  set -- $ARGS
+
+  # Set the appropriate prompt
+  set_prompt
+
+  if [[ -z "$PIPED_DATA" ]]; then
+    echo "No valid data found in piped input. Skipping LLM processing."
+  else
+    # Count tokens and select appropriate model
+    TOKEN_COUNT=$(count_tokens "$PIPED_DATA")
+    echo "Estimated token count: $TOKEN_COUNT"
+
+    if [ $TOKEN_COUNT -gt $TOKEN_THRESHOLD ]; then
+      echo "Large input detected. Using Gemini model..."
+      echo "$PIPED_DATA" | aichat -r reaper -m gemini:gemini-2.5-pro-preview-05-06 "$OSINT_PROMPT"
+    else
+      echo "$PIPED_DATA" | aichat -r reaper "$OSINT_PROMPT"
+    fi
+    echo "Processing completed for piped input data."
+  fi
+  exit 0
+fi
+
+if [ $# -eq 0 ]; then
+  show_help
+  exit 1
+fi
+
+# Parse all arguments to handle flags
+ARGS=$(parse_flags "$@")
+set -- $ARGS
+
+COMMAND=$1
+shift
+
+# Set the appropriate prompt based on flags
+set_prompt
+
+case "$COMMAND" in
+"phone")
+  if [ $# -lt 1 ]; then
+    echo "Error: Please provide a phone number."
+    echo "Usage: $COMMAND_NAME phone <phone_number> [flags]"
+    exit 1
+  fi
+  echo "Looking up phone number: $1"
+  RESULT=$(intls phone "$1")
+  if [[ -z "$RESULT" ]]; then
+    echo "No data found or invalid response for phone number: $1"
+  else
+    # Count tokens and select appropriate model
+    TOKEN_COUNT=$(count_tokens "$RESULT")
+    echo "Estimated token count: $TOKEN_COUNT"
+
+    if [ $TOKEN_COUNT -gt $TOKEN_THRESHOLD ]; then
+      echo "Large input detected. Using Gemini model..."
+      echo "$RESULT" | aichat -r reaper -m gemini:gemini-2.5-pro-preview-05-06 "$OSINT_PROMPT this is a phone search."
+    else
+      echo "$RESULT" | aichat -r reaper "$OSINT_PROMPT this is a phone search."
+    fi
+    echo "Lookup completed for phone number: $1"
+  fi
+  ;;
+
+"email")
+  if [ $# -lt 1 ]; then
+    echo "Error: Please provide an email address."
+    echo "Usage: $COMMAND_NAME email <email_address> [flags]"
+    exit 1
+  fi
+  echo "Looking up email address: $1"
+  RESULT=$(intls email "$1")
+  if [[ -z "$RESULT" ]]; then
+    echo "No data found or invalid response for email address: $1"
+  else
+    # Count tokens and select appropriate model
+    TOKEN_COUNT=$(count_tokens "$RESULT")
+    echo "Estimated token count: $TOKEN_COUNT"
+
+    if [ $TOKEN_COUNT -gt $TOKEN_THRESHOLD ]; then
+      echo "Large input detected. Using Gemini model..."
+      echo "$RESULT" | aichat -r reaper -m gemini:gemini-2.5-pro-preview-05-06 "$OSINT_PROMPT this is an email address search."
+    else
+      echo "$RESULT" | aichat -r reaper "$OSINT_PROMPT this is an email address search."
+    fi
+    echo "Lookup completed for email address: $1"
+  fi
+  ;;
+
+"person")
+  if [ $# -lt 2 ]; then
+    echo "Error: Please provide at least first and last name."
+    echo "Usage: $COMMAND_NAME person <firstName> <lastName> [city] [state] [age] [flags]"
+    exit 1
+  fi
+
+  # Build the intls command with proper arguments
+  INTLS_CMD="intls people \"$1\" \"$2\""
+
+  # Add optional parameters if provided
+  if [ $# -ge 3 ] && [ -n "$3" ]; then
+    INTLS_CMD="$INTLS_CMD --city \"$3\""
+  fi
+  if [ $# -ge 4 ] && [ -n "$4" ]; then
+    INTLS_CMD="$INTLS_CMD --state \"$4\""
+  fi
+  if [ $# -ge 5 ] && [ -n "$5" ]; then
+    INTLS_CMD="$INTLS_CMD --age \"$5\""
+  fi
+
+  echo "Searching for person: $1 $2"
+  RESULT=$(eval $INTLS_CMD)
+  if [[ -z "$RESULT" ]]; then
+    echo "No data found or invalid response for person: $1 $2"
+  else
+    # Count tokens and select appropriate model
+    TOKEN_COUNT=$(count_tokens "$RESULT")
+    echo "Estimated token count: $TOKEN_COUNT"
+
+    if [ $TOKEN_COUNT -gt $TOKEN_THRESHOLD ]; then
+      echo "Large input detected. Using Gemini model..."
+      echo "$RESULT" | aichat -r reaper -m gemini:gemini-2.5-pro-preview-05-06 "$OSINT_PROMPT this is a generic name search so different individuals are expected to show up in many cases."
+    else
+      echo "$RESULT" | aichat -r reaper "$OSINT_PROMPT this is a generic name search so different individuals are expected to show up in many cases."
+    fi
+    echo "Lookup completed for person: $1 $2"
+  fi
+  ;;
+
+"address")
+  if [ $# -lt 4 ]; then
+    echo "Error: Please provide street, city, state, and zip."
+    echo "Usage: $COMMAND_NAME address <street> <city> <state> <zip> [flags]"
+    exit 1
+  fi
+
+  echo "Looking up address: $1, $2, $3 $4"
+  RESULT=$(intls address --street "$1" --city "$2" --state "$3" --zip "$4")
+  if [[ -z "$RESULT" ]]; then
+    echo "No data found or invalid response for address: $1, $2, $3 $4"
+  else
+    # Count tokens and select appropriate model
+    TOKEN_COUNT=$(count_tokens "$RESULT")
+    echo "Estimated token count: $TOKEN_COUNT"
+
+    if [ $TOKEN_COUNT -gt $TOKEN_THRESHOLD ]; then
+      echo "Large input detected. Using Gemini model..."
+      echo "$RESULT" | aichat -r reaper -m gemini:gemini-2.5-pro-preview-05-06 "$OSINT_PROMPT this is an address search."
+    else
+      echo "$RESULT" | aichat -r reaper "$OSINT_PROMPT this is an address search."
+    fi
+    echo "Lookup completed for address: $1, $2, $3 $4"
+  fi
+  ;;
+
+*)
+  echo "Error: Unknown command '$COMMAND'"
+  echo "Run '$COMMAND_NAME' without arguments to see available commands"
+  exit 1
+  ;;
+esac
